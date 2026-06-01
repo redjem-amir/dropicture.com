@@ -1,4 +1,4 @@
-# dropicture/.terraform/main.tf
+# dropicture/terraform/main.tf
 terraform {
   required_version = ">= 1.10"
   required_providers {

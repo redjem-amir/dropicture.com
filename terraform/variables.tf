@@ -1,4 +1,4 @@
-# dropicture/.terraform/variables.tf
+# dropicture/terraform/variables.tf
 variable "hcloud_token" {
   description = "Hetzner Cloud API token (env: TF_VAR_hcloud_token)"
   type        = string
@@ -36,7 +36,7 @@ variable "location" {
 }
 
 variable "volume_size" {
-  description = "Size of the photo storage volume, in GB (Hetzner minimum = 10)"
+  description = "Size of the per-node object-storage volume, in GB (Hetzner minimum = 10)"
   type        = number
   default     = 50
 
@@ -61,4 +61,33 @@ variable "admin_ips" {
     condition     = length(var.admin_ips) > 0
     error_message = "admin_ips must not be empty. Set at least your own IP, otherwise you will be locked out."
   }
+}
+
+variable "node_count" {
+  description = "Number of Nomad nodes. 1 = single-node (default). Increase to add nodes."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.node_count >= 1
+    error_message = "node_count must be >= 1."
+  }
+}
+
+variable "network_ip_range" {
+  description = "CIDR of the private network"
+  type        = string
+  default     = "10.0.0.0/16"
+}
+
+variable "subnet_ip_range" {
+  description = "CIDR of the nodes subnet (within network_ip_range)"
+  type        = string
+  default     = "10.0.1.0/24"
+}
+
+variable "network_zone" {
+  description = "Hetzner network zone (eu-central for fsn1/nbg1/hel1)"
+  type        = string
+  default     = "eu-central"
 }

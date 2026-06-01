@@ -26,6 +26,24 @@ locals {
   ])
 
   cloudflare_all_cidrs = concat(local.cloudflare_ipv4_cidrs, local.cloudflare_ipv6_cidrs)
+
+  node_private_ips = [for i in range(var.node_count) : cidrhost(var.subnet_ip_range, 10 + i)]
+}
+
+resource "hcloud_network" "main" {
+  name     = "${var.project_name}-net"
+  ip_range = var.network_ip_range
+
+  labels = {
+    project = var.project_name
+  }
+}
+
+resource "hcloud_network_subnet" "nodes" {
+  network_id   = hcloud_network.main.id
+  type         = "cloud"
+  network_zone = var.network_zone
+  ip_range     = var.subnet_ip_range
 }
 
 resource "hcloud_firewall" "app" {
@@ -33,7 +51,7 @@ resource "hcloud_firewall" "app" {
 
   labels = {
     project = var.project_name
-    purpose = "single-node-ingress-protection"
+    purpose = "ingress-protection"
   }
 
   rule {
@@ -76,8 +94,14 @@ resource "hcloud_firewall" "app" {
   }
 }
 
+moved {
+  from = hcloud_server.app
+  to   = hcloud_server.app[0]
+}
+
 resource "hcloud_server" "app" {
-  name         = "${var.project_name}-app"
+  count        = var.node_count
+  name         = "${var.project_name}-app-${count.index + 1}"
   image        = var.os_image
   server_type  = var.server_type
   location     = var.location
@@ -86,29 +110,38 @@ resource "hcloud_server" "app" {
 
   labels = {
     project = var.project_name
-    role    = "nomad-single-node"
+    role    = "nomad-node"
   }
 
   public_net {
     ipv4_enabled = true
     ipv6_enabled = true
   }
+
+  network {
+    network_id = hcloud_network.main.id
+    ip         = local.node_private_ips[count.index]
+  }
+
+  depends_on = [hcloud_network_subnet.nodes]
 }
 
-resource "hcloud_volume" "photos" {
-  name     = "${var.project_name}-photos"
+resource "hcloud_volume" "media" {
+  count    = var.node_count
+  name     = "${var.project_name}-media-${count.index + 1}"
   size     = var.volume_size
   location = var.location
   format   = "ext4"
 
   labels = {
     project = var.project_name
-    purpose = "photo-storage"
+    purpose = "object-storage"
   }
 }
 
-resource "hcloud_volume_attachment" "photos" {
-  volume_id = hcloud_volume.photos.id
-  server_id = hcloud_server.app.id
+resource "hcloud_volume_attachment" "media" {
+  count     = var.node_count
+  volume_id = hcloud_volume.media[count.index].id
+  server_id = hcloud_server.app[count.index].id
   automount = true
 }

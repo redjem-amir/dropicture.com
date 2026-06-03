@@ -1,6 +1,6 @@
 @startuml ansible
 title dropicture - Ansible provisioning (Nomad cluster)
-footer Author: Amir Redjem   |   2026-06-03   |   v1.0
+footer Author: Amir Redjem   |   2026-06-03   |   v1.1
 
 skinparam shadowing false
 skinparam defaultFontName Helvetica
@@ -38,7 +38,7 @@ op -> ans : ansible-playbook playbook.yml\nAWS creds + SSH_PRIVATE_KEY_B64
 ans -> ans : assert required env vars
 ans -> s3 : GET terraform.tfstate
 s3 --> ans : state JSON
-ans -> ans : parse outputs\n(server/client public + private IPs)
+ans -> ans : parse outputs\n(server/client IPs,\nOrigin CA cert + key, no_log)
 ans -> ans : delete local state copy (sensitive)
 ans -> ans : write SSH key to tempfile (0600)
 ans -> ans : add_host -> groups\nnomad_servers / nomad_clients
@@ -46,11 +46,15 @@ ans -> ans : add_host -> groups\nnomad_servers / nomad_clients
 == Play 2 - Configure the Nomad cluster (hosts: nomad, over SSH) ==
 ans -> nodes : add HashiCorp apt repo,\ninstall Nomad 2.0.2-1
 ans -> nodes : install Docker + CNI 1.6.2,\nbridge modules + sysctls
+ans -> nodes : locate /mnt/HC_Volume_* mount,\ncreate postgres/ + dragonfly/ data dirs
+ans -> nodes : write Origin CA cert + key\nto /opt/dropicture/tls (0644 / 0600)
 ans -> nodes : template /etc/nomad.d/nomad.hcl
 note over nodes
   server block on servers only
   (bootstrap_expect = #servers, retry_join)
   client block on every node
+  host_volumes: postgres-data,
+  dragonfly-data, tls-origin (ro)
   ACL enabled, UI disabled
   datacenter dc1 / region global
 end note

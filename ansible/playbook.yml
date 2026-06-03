@@ -51,6 +51,12 @@
         _client_public_ips: "{{ _tfstate.outputs.client_public_ips.value }}"
         _client_private_ips: "{{ _tfstate.outputs.client_private_ips.value }}"
 
+    - name: Extract the Origin CA certificate and key from the outputs
+      ansible.builtin.set_fact:
+        _origin_cert: "{{ _tfstate.outputs.origin_cert_pem.value }}"
+        _origin_key: "{{ _tfstate.outputs.origin_key_pem.value }}"
+      no_log: true
+
     - name: Compute the full private address set
       ansible.builtin.set_fact:
         _all_private_ips: "{{ _server_private_ips + _client_private_ips }}"
@@ -116,6 +122,7 @@
     nomad_version: "2.0.2-1"
     cni_plugins_version: "1.6.2"
     cni_plugins_baseurl: "https://github.com/containernetworking/plugins/releases/download"
+    dropicture_tls_dir: /opt/dropicture/tls
   handlers:
     - name: Restart nomad
       ansible.builtin.service:
@@ -214,6 +221,47 @@
         group: root
         mode: "0700"
 
+    - name: Locate the Hetzner media volume mountpoint
+      ansible.builtin.set_fact:
+        media_mount: "{{ ansible_mounts | map(attribute='mount') | select('match', '^/mnt/HC_Volume_') | list | first | default('') }}"
+
+    - name: Ensure the media volume is mounted
+      ansible.builtin.assert:
+        that:
+          - media_mount | length > 0
+        fail_msg: "No /mnt/HC_Volume_* mountpoint found on {{ inventory_hostname }} — is the Hetzner volume attached and automounted?"
+        quiet: true
+
+    - name: Create the data directories on the media volume
+      ansible.builtin.file:
+        path: "{{ media_mount }}/{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      loop:
+        - postgres
+        - dragonfly
+
+    - name: Ensure the TLS directory exists
+      ansible.builtin.file:
+        path: "{{ dropicture_tls_dir }}"
+        state: directory
+        mode: "0750"
+
+    - name: Write the Origin CA certificate
+      ansible.builtin.copy:
+        dest: "{{ dropicture_tls_dir }}/origin.crt"
+        content: "{{ hostvars['localhost']._origin_cert }}"
+        mode: "0644"
+
+    - name: Write the Origin CA private key
+      ansible.builtin.copy:
+        dest: "{{ dropicture_tls_dir }}/origin.key"
+        content: "{{ hostvars['localhost']._origin_key }}"
+        mode: "0600"
+      no_log: true
+
     - name: Deploy the Nomad configuration
       ansible.builtin.copy:
         dest: "{{ nomad_config_dir }}/nomad.hcl"
@@ -222,9 +270,6 @@
         mode: "0640"
         validate: "nomad config validate %s"
         content: |
-          # Managed by Ansible - do not edit
-          # Role: {{ nomad_role }}. Servers form the Raft quorum (and run workloads);
-          # clients are workers pointing at the servers. Counts come from Terraform.
 
           name       = "{{ node_private_ip }}"
           data_dir   = "{{ nomad_data_dir }}"
@@ -253,6 +298,19 @@
           client {
             enabled = true
             servers = [{% for h in groups['nomad_servers'] %}"{{ hostvars[h].node_private_ip }}:4647"{% if not loop.last %}, {% endif %}{% endfor %}]
+
+            host_volume "postgres-data" {
+              path = "{{ media_mount }}/postgres"
+            }
+
+            host_volume "dragonfly-data" {
+              path = "{{ media_mount }}/dragonfly"
+            }
+
+            host_volume "tls-origin" {
+              path      = "{{ dropicture_tls_dir }}"
+              read_only = true
+            }
           }
 
           acl {

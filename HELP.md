@@ -112,8 +112,8 @@ nomad job run -var="app_version=1.0.0" selfhost.nomad.hcl
 ```
 
 **Step 3 — Verify:** `nomad job status dropicture`, then open
-`http://localhost:3000` (frontend) — the API answers on `http://localhost:3002`.
+`http://localhost:3000` (frontend) — the API answers on `http://localhost:3001`.
 
 **If it fails:** `missing drivers` → Docker not running, or `DOCKER_HOST` not set
 (macOS) · job stuck `pending` → check `nomad alloc status <id>` for the reason ·
-ports already in use → stop whatever holds `3000/3002/5432/6379`.
+ports already in use → stop whatever holds `3000/3001/5432/6379`.

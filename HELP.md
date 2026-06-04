@@ -1,119 +1,84 @@
-# HELP — Running your own dropicture
+# HELP — Quick deploy
 
-dropicture is open source (MIT): anyone can run their own instance. Two supported
-setups: **Cloud** (your own sovereign deployment on Hetzner, behind your own
-domain) or **Self-hosted** (your own machine — Linux, macOS, Windows).
+Prereqs: infra provisioned (`terraform apply` + `ansible-playbook ansible/playbook.yml`).
+All commands run from the repository root.
 
----
-
-## 1. Cloud (Hetzner + Cloudflare)
-
-**Bring your own:** a Hetzner Cloud account (API token), a domain managed by
-Cloudflare, an AWS account (S3 bucket for the Terraform state + Secrets Manager),
-and your public IP.
-
-**Provision once:**
+## 0. Configure (once)
 
 ```bash
-# terraform/terraform.tfvars — set at least cloudflare_zone_name = "<your-domain>"
-# and export TF_VAR_hcloud_token, TF_VAR_ssh_public_key_b64, TF_VAR_admin_ips
-terraform -chdir=terraform apply
-
-# needs AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / SSH_PRIVATE_KEY_B64
-ansible-playbook ansible/playbook.yml
-```
-
-**Images:** the job deploys the project's published images
-(`ghcr.io/<owner>/dropicture.com/{backend,frontend}`). Running a fork? Push a
-`vX.Y.Z` git tag (CI publishes the images under your namespace — set the GHCR
-packages to **Public**) and update `image_base` in `cloud.nomad.hcl`.
-
-**Step 1 — Create `.env`** (once; PostgreSQL keeps the first credentials it is
-initialized with; never commit this file):
-
-```bash
-cat >> .env <<EOF
-POSTGRES_HOST=10.0.1.10
+cat > .env <<EOF
+IMAGE_TAG=latest
 POSTGRES_DB=dropicture
 POSTGRES_USER=$(openssl rand -hex 12)
 POSTGRES_PASSWORD=$(openssl rand -hex 12)
-REDIS_HOST=10.0.1.10
+GARAGE_RPC_SECRET=$(openssl rand -hex 32)
+GARAGE_KEY_ID=GK$(openssl rand -hex 12)
+GARAGE_KEY_SECRET=$(openssl rand -hex 32)
 EOF
 ```
 
-`POSTGRES_HOST` / `REDIS_HOST` are the node's private IP — `10.0.1.10` with the
-default network settings (`terraform output server_private_ips` to confirm).
+`.env` is gitignored — never commit it.
 
-**Step 2 — Deploy:**
+## 1. Cloud (Docker Swarm)
 
 ```bash
-# Cluster address + ACL token (stored in AWS Secrets Manager by Ansible)
-export NOMAD_ADDR="http://$(terraform -chdir=terraform output -raw server_public_ip):4646"
-export NOMAD_TOKEN="$(aws secretsmanager get-secret-value \
-  --secret-id nomad/dropicture/management-token \
-  --region eu-west-3 --query SecretString --output text)"
+docker context create dropicture \
+  --docker "host=ssh://root@$(terraform -chdir=terraform output -raw manager_public_ip)"
 
-# Job variables from .env
+docker context use dropicture
 set -a; source .env; set +a
-export NOMAD_VAR_postgres_host="$POSTGRES_HOST" \
-       NOMAD_VAR_postgres_db="$POSTGRES_DB" \
-       NOMAD_VAR_postgres_user="$POSTGRES_USER" \
-       NOMAD_VAR_postgres_password="$POSTGRES_PASSWORD" \
-       NOMAD_VAR_redis_host="$REDIS_HOST"
-
-# Deploy a pinned version — rollback = re-run with the previous one
-nomad job run -var="app_version=1.0.0" cloud.nomad.hcl
+docker stack deploy --detach=false -c docker-compose.yml dropicture
 ```
 
-**Step 3 — Verify:** `nomad job status dropicture` (all 5 groups running), then
-`curl -I https://<your-domain>`.
-
-**If it fails:** `connection refused` → your IP is not in `admin_ips` ·
-`403` → bad/missing `NOMAD_TOKEN` · `no value for required variable` → missing
-`NOMAD_VAR_*` export · `missing host volumes` → re-run the Ansible playbook ·
-image pull error → GHCR package still private, or the tag was never built.
-
----
-
-## 2. Self-hosted (your own machine)
-
-Runs the same stack on a single-node Nomad agent with Docker — no cloud account,
-no domain: Docker named volumes for the data, services exposed on `localhost`.
-
-**Prerequisites**
-
-- **Docker** — Docker Desktop (macOS, Windows) or Docker Engine (Linux).
-- **Nomad** — single binary from [releases.hashicorp.com/nomad](https://releases.hashicorp.com/nomad/);
-  put it on your `PATH` (e.g. `~/bin`, no admin rights needed).
-
-**Step 1 — Start the agent** (keep it running in its own terminal):
+First deploy only — init Garage (S3):
 
 ```bash
-# macOS — point Nomad at the Docker Desktop user socket (works without admin):
-export DOCKER_HOST="unix://$HOME/.docker/run/docker.sock"
-nomad agent -dev -bind 127.0.0.1
-
-# Linux:   sudo nomad agent -dev -bind 127.0.0.1
-# Windows: nomad agent -dev -bind 127.0.0.1   (Docker Desktop running)
+G=$(docker ps -qf name=dropicture_dropicture-garage)
+docker exec $G /garage status
+docker exec $G /garage layout assign -z dc1 -c 40G <node_id>
+docker exec $G /garage layout apply --version 1
+docker exec $G /garage key import --yes "$GARAGE_KEY_ID" "$GARAGE_KEY_SECRET" -n dropicture-app
+docker exec $G /garage bucket create dropicture-media
+docker exec $G /garage bucket allow --read --write dropicture-media --key dropicture-app
 ```
 
-**Step 2 — Deploy:** same `.env` as the cloud section, with
-`POSTGRES_HOST=localhost` and `REDIS_HOST=localhost`, then:
+Check: `docker stack services dropicture`, then `curl -I https://dropicture.com`.
+Update / rollback: redeploy with another `IMAGE_TAG`.
+
+## 2. Local
+
+```bash
+docker context use default
+docker compose -f docker-compose.local.yml up -d
+```
+
+First run only — init Garage:
 
 ```bash
 set -a; source .env; set +a
-export NOMAD_VAR_postgres_host="$POSTGRES_HOST" \
-       NOMAD_VAR_postgres_db="$POSTGRES_DB" \
-       NOMAD_VAR_postgres_user="$POSTGRES_USER" \
-       NOMAD_VAR_postgres_password="$POSTGRES_PASSWORD" \
-       NOMAD_VAR_redis_host="$REDIS_HOST"
-
-nomad job run -var="app_version=1.0.0" selfhost.nomad.hcl
+dc() { docker compose -f docker-compose.local.yml "$@"; }
+dc exec dropicture-garage /garage status
+dc exec dropicture-garage /garage layout assign -z dc1 -c 10G <node_id>
+dc exec dropicture-garage /garage layout apply --version 1
+dc exec dropicture-garage /garage key import --yes "$GARAGE_KEY_ID" "$GARAGE_KEY_SECRET" -n dropicture-app
+dc exec dropicture-garage /garage bucket create dropicture-media
+dc exec dropicture-garage /garage bucket allow --read --write dropicture-media --key dropicture-app
 ```
 
-**Step 3 — Verify:** `nomad job status dropicture`, then open
-`http://localhost:3000` (frontend) — the API answers on `http://localhost:3001`.
+Open http://localhost:3000 (API: http://localhost:3001).
+Stop: `docker compose -f docker-compose.local.yml down` (`-v` wipes data).
 
-**If it fails:** `missing drivers` → Docker not running, or `DOCKER_HOST` not set
-(macOS) · job stuck `pending` → check `nomad alloc status <id>` for the reason ·
-ports already in use → stop whatever holds `3000/3001/5432/6379`.
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `"VAR is required"` | `set -a; source .env; set +a` |
+| `permission denied (publickey)` | load the deploy key: `ssh-add` |
+| `config not found: dropicture_origin_*` | re-run the Ansible playbook |
+| pull denied / `No such image` | GHCR package is private after first push → set it **Public**; or tag not built |
+| task stuck `Pending` | `docker service ps dropicture_<svc> --no-trunc` |
+| nginx `502` | `docker service logs dropicture_dropicture-backend` |
+| `failed to update config` | configs are immutable → bump `name:` (`_v2` → `_v3`) |
+| Cloudflare `52x` | zone SSL mode = **Full (strict)** |
+| deploys to the wrong place | `docker context ls` → `use default` (local) / `use dropicture` (cloud) |
+| app S3 errors | Garage init step skipped |

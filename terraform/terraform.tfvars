@@ -7,5 +7,5 @@ location             = "fsn1"
 volume_size          = 50
 cloudflare_zone_name = "dropicture.com"
 
-server_count = 1
-client_count = 0
+manager_count = 1
+worker_count  = 0

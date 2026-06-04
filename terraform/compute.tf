@@ -27,8 +27,8 @@ locals {
 
   cloudflare_all_cidrs = concat(local.cloudflare_ipv4_cidrs, local.cloudflare_ipv6_cidrs)
 
-  server_private_ips = [for i in range(var.server_count) : cidrhost(var.subnet_ip_range, 10 + i)]
-  client_private_ips = [for i in range(var.client_count) : cidrhost(var.subnet_ip_range, 100 + i)]
+  manager_private_ips = [for i in range(var.manager_count) : cidrhost(var.subnet_ip_range, 10 + i)]
+  worker_private_ips  = [for i in range(var.worker_count) : cidrhost(var.subnet_ip_range, 100 + i)]
 }
 
 resource "hcloud_network" "main" {
@@ -59,23 +59,15 @@ resource "hcloud_firewall" "app" {
     direction   = "in"
     protocol    = "tcp"
     port        = "22"
-    source_ips  = var.admin_ips
-    description = "SSH admin"
+    source_ips  = ["0.0.0.0/0", "::/0"]
+    description = "SSH from anywhere (key-only auth enforced by Ansible)"
   }
 
   rule {
     direction   = "in"
     protocol    = "icmp"
-    source_ips  = var.admin_ips
-    description = "ICMP admin (ping)"
-  }
-
-  rule {
-    direction   = "in"
-    protocol    = "tcp"
-    port        = "4646"
-    source_ips  = var.admin_ips
-    description = "Nomad API (admin only)"
+    source_ips  = ["0.0.0.0/0", "::/0"]
+    description = "ICMP (ping)"
   }
 
   rule {
@@ -95,18 +87,18 @@ resource "hcloud_firewall" "app" {
   }
 }
 
-resource "hcloud_server" "server" {
-  count        = var.server_count
-  name         = "${var.project_name}-server-${count.index + 1}"
+resource "hcloud_server" "manager" {
+  count        = var.manager_count
+  name         = "${var.project_name}-manager-${count.index + 1}"
   image        = var.os_image
-  server_type  = var.server_type
+  server_type  = var.manager_server_type
   location     = var.location
   ssh_keys     = [hcloud_ssh_key.deploy.id]
   firewall_ids = [hcloud_firewall.app.id]
 
   labels = {
     project = var.project_name
-    role    = "nomad-server"
+    role    = "swarm-manager"
   }
 
   public_net {
@@ -116,24 +108,24 @@ resource "hcloud_server" "server" {
 
   network {
     network_id = hcloud_network.main.id
-    ip         = local.server_private_ips[count.index]
+    ip         = local.manager_private_ips[count.index]
   }
 
   depends_on = [hcloud_network_subnet.nodes]
 }
 
-resource "hcloud_server" "client" {
-  count        = var.client_count
+resource "hcloud_server" "worker" {
+  count        = var.worker_count
   name         = "${var.project_name}-worker-${count.index + 1}"
   image        = var.os_image
-  server_type  = var.client_server_type
+  server_type  = var.worker_server_type
   location     = var.location
   ssh_keys     = [hcloud_ssh_key.deploy.id]
   firewall_ids = [hcloud_firewall.app.id]
 
   labels = {
     project = var.project_name
-    role    = "nomad-client"
+    role    = "swarm-worker"
   }
 
   public_net {
@@ -143,15 +135,15 @@ resource "hcloud_server" "client" {
 
   network {
     network_id = hcloud_network.main.id
-    ip         = local.client_private_ips[count.index]
+    ip         = local.worker_private_ips[count.index]
   }
 
   depends_on = [hcloud_network_subnet.nodes]
 }
 
-resource "hcloud_volume" "server_media" {
-  count    = var.server_count
-  name     = "${var.project_name}-media-server-${count.index + 1}"
+resource "hcloud_volume" "manager_media" {
+  count    = var.manager_count
+  name     = "${var.project_name}-media-manager-${count.index + 1}"
   size     = var.volume_size
   location = var.location
   format   = "ext4"
@@ -162,15 +154,15 @@ resource "hcloud_volume" "server_media" {
   }
 }
 
-resource "hcloud_volume_attachment" "server_media" {
-  count     = var.server_count
-  volume_id = hcloud_volume.server_media[count.index].id
-  server_id = hcloud_server.server[count.index].id
+resource "hcloud_volume_attachment" "manager_media" {
+  count     = var.manager_count
+  volume_id = hcloud_volume.manager_media[count.index].id
+  server_id = hcloud_server.manager[count.index].id
   automount = true
 }
 
-resource "hcloud_volume" "client_media" {
-  count    = var.client_count
+resource "hcloud_volume" "worker_media" {
+  count    = var.worker_count
   name     = "${var.project_name}-media-worker-${count.index + 1}"
   size     = var.volume_size
   location = var.location
@@ -182,9 +174,9 @@ resource "hcloud_volume" "client_media" {
   }
 }
 
-resource "hcloud_volume_attachment" "client_media" {
-  count     = var.client_count
-  volume_id = hcloud_volume.client_media[count.index].id
-  server_id = hcloud_server.client[count.index].id
+resource "hcloud_volume_attachment" "worker_media" {
+  count     = var.worker_count
+  volume_id = hcloud_volume.worker_media[count.index].id
+  server_id = hcloud_server.worker[count.index].id
   automount = true
 }

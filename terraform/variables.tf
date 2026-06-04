@@ -23,14 +23,14 @@ variable "os_image" {
   default     = "ubuntu-24.04"
 }
 
-variable "server_type" {
-  description = "Hetzner server type for Nomad servers/masters (cpx21 = 3 vCPU / 4 GB, cpx31 = 4 vCPU / 8 GB, cpx41 = 8 vCPU / 16 GB)"
+variable "manager_server_type" {
+  description = "Hetzner server type for Swarm managers (cpx21 = 3 vCPU / 4 GB, cpx31 = 4 vCPU / 8 GB, cpx41 = 8 vCPU / 16 GB)"
   type        = string
   default     = "cpx31"
 }
 
-variable "client_server_type" {
-  description = "Hetzner server type for Nomad clients/workers (run the actual workloads)"
+variable "worker_server_type" {
+  description = "Hetzner server type for Swarm workers (run the actual workloads)"
   type        = string
   default     = "cpx31"
 }
@@ -58,36 +58,25 @@ variable "cloudflare_zone_name" {
   default     = "dropicture.com"
 }
 
-variable "admin_ips" {
-  description = "IPs allowed for SSH (22) and the Nomad API (4646). CIDR format, e.g. ['203.0.113.42/32']. Provided via TF_VAR_admin_ips."
-  type        = list(string)
-  default     = []
-
-  validation {
-    condition     = length(var.admin_ips) > 0
-    error_message = "admin_ips must not be empty. Set at least your own IP, otherwise you will be locked out."
-  }
-}
-
-variable "server_count" {
-  description = "Number of Nomad servers (masters / Raft quorum). MUST be odd (1, 3, 5). 1 = single master (no control-plane HA), 3 = HA."
+variable "manager_count" {
+  description = "Number of Swarm managers (Raft quorum). MUST be odd (1, 3, 5). 1 = single manager (no control-plane HA), 3 = HA."
   type        = number
   default     = 1
 
   validation {
-    condition     = var.server_count >= 1 && var.server_count % 2 == 1
-    error_message = "server_count must be an odd number (1, 3, 5, ...) to keep a healthy Raft quorum."
+    condition     = var.manager_count >= 1 && var.manager_count % 2 == 1
+    error_message = "manager_count must be an odd number (1, 3, 5, ...) to keep a healthy Raft quorum."
   }
 }
 
-variable "client_count" {
-  description = "Number of Nomad clients (workers). 0 = run workloads on the servers only. Freely scalable up or down."
+variable "worker_count" {
+  description = "Number of Swarm workers. 0 = run workloads on the managers only. Freely scalable up or down."
   type        = number
   default     = 0
 
   validation {
-    condition     = var.client_count >= 0
-    error_message = "client_count must be >= 0."
+    condition     = var.worker_count >= 0
+    error_message = "worker_count must be >= 0."
   }
 }
 

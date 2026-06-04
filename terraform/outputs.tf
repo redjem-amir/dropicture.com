@@ -1,59 +1,59 @@
 # dropicture/terraform/outputs.tf
-output "server_public_ip" {
-  description = "Public IPv4 of the primary server (server 0)"
-  value       = hcloud_server.server[0].ipv4_address
+output "manager_public_ip" {
+  description = "Public IPv4 of the primary manager (manager 1)"
+  value       = hcloud_server.manager[0].ipv4_address
 }
 
-output "server_public_ipv6" {
-  description = "Public IPv6 of the primary server (server 0)"
-  value       = hcloud_server.server[0].ipv6_address
+output "manager_public_ipv6" {
+  description = "Public IPv6 of the primary manager (manager 1)"
+  value       = hcloud_server.manager[0].ipv6_address
 }
 
 output "ssh" {
-  description = "SSH command to connect to the primary server (server 0)"
-  value       = "ssh root@${hcloud_server.server[0].ipv4_address}"
+  description = "SSH command to connect to the primary manager (manager 1)"
+  value       = "ssh root@${hcloud_server.manager[0].ipv4_address}"
 }
 
-output "nomad_ui" {
-  description = "Nomad API on the primary server (reachable from admin_ips only)"
-  value       = "http://${hcloud_server.server[0].ipv4_address}:4646"
+output "docker_context" {
+  description = "Command to manage the Swarm remotely over SSH from any machine"
+  value       = "docker context create dropicture --docker \"host=ssh://root@${hcloud_server.manager[0].ipv4_address}\""
 }
 
-output "server_public_ips" {
-  description = "Public IPv4 of every Nomad server (master)"
-  value       = hcloud_server.server[*].ipv4_address
+output "manager_public_ips" {
+  description = "Public IPv4 of every Swarm manager"
+  value       = hcloud_server.manager[*].ipv4_address
 }
 
-output "server_private_ips" {
-  description = "Private IPs of every Nomad server (Raft retry_join targets)"
-  value       = local.server_private_ips
+output "manager_private_ips" {
+  description = "Private IPs of every Swarm manager (advertise/join targets)"
+  value       = local.manager_private_ips
 }
 
-# --- Client (worker) addresses ---------------------------------------------
-output "client_public_ips" {
-  description = "Public IPv4 of every Nomad client (worker)"
-  value       = hcloud_server.client[*].ipv4_address
+# --- Worker addresses --------------------------------------------------------
+output "worker_public_ips" {
+  description = "Public IPv4 of every Swarm worker"
+  value       = hcloud_server.worker[*].ipv4_address
 }
 
-output "client_private_ips" {
-  description = "Private IPs of every Nomad client (worker)"
-  value       = local.client_private_ips
+output "worker_private_ips" {
+  description = "Private IPs of every Swarm worker"
+  value       = local.worker_private_ips
 }
 
-# --- Combined (servers first, then clients) for convenience ----------------
+# --- Combined (managers first, then workers) for convenience -----------------
 output "node_public_ips" {
-  description = "Public IPv4 of every node (servers first, then clients)"
-  value       = concat(hcloud_server.server[*].ipv4_address, hcloud_server.client[*].ipv4_address)
+  description = "Public IPv4 of every node (managers first, then workers)"
+  value       = concat(hcloud_server.manager[*].ipv4_address, hcloud_server.worker[*].ipv4_address)
 }
 
 output "node_private_ips" {
-  description = "Private IPs of every node (servers first, then clients)"
-  value       = concat(local.server_private_ips, local.client_private_ips)
+  description = "Private IPs of every node (managers first, then workers)"
+  value       = concat(local.manager_private_ips, local.worker_private_ips)
 }
 
 output "media_volume_devices" {
   description = "Device path of each node's object-storage volume (auto-mounted under /mnt/HC_Volume_<id>)"
-  value       = concat(hcloud_volume.server_media[*].linux_device, hcloud_volume.client_media[*].linux_device)
+  value       = concat(hcloud_volume.manager_media[*].linux_device, hcloud_volume.worker_media[*].linux_device)
 }
 
 output "site_url" {

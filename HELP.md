@@ -12,12 +12,19 @@ POSTGRES_DB=dropicture
 POSTGRES_USER=$(openssl rand -hex 12)
 POSTGRES_PASSWORD=$(openssl rand -hex 12)
 GARAGE_RPC_SECRET=$(openssl rand -hex 32)
-GARAGE_KEY_ID=GK$(openssl rand -hex 12)
-GARAGE_KEY_SECRET=$(openssl rand -hex 32)
+S3_ACCESS_KEY_ID=GK$(openssl rand -hex 16)
+S3_SECRET_ACCESS_KEY=$(openssl rand -hex 32)
+S3_BUCKET=dropicture-media
 EOF
 ```
 
 `.env` is gitignored — never commit it.
+
+> No Garage setup needed: on first boot, `--single-node` assigns the layout and
+> `--default-bucket` creates the access key and the bucket from the
+> `GARAGE_DEFAULT_*` variables wired in the compose files. The S3 values above
+> are only read on the **first** start — changing them later does not update
+> the existing key.
 
 ## 1. Cloud (Docker Swarm)
 
@@ -30,18 +37,6 @@ set -a; source .env; set +a
 docker stack deploy --detach=false -c docker-compose.yml dropicture
 ```
 
-First deploy only — init Garage (S3):
-
-```bash
-G=$(docker ps -qf name=dropicture_dropicture-garage)
-docker exec $G /garage status
-docker exec $G /garage layout assign -z dc1 -c 40G <node_id>
-docker exec $G /garage layout apply --version 1
-docker exec $G /garage key import --yes "$GARAGE_KEY_ID" "$GARAGE_KEY_SECRET" -n dropicture-app
-docker exec $G /garage bucket create dropicture-media
-docker exec $G /garage bucket allow --read --write dropicture-media --key dropicture-app
-```
-
 Check: `docker stack services dropicture`, then `curl -I https://dropicture.com`.
 Update / rollback: redeploy with another `IMAGE_TAG`.
 
@@ -49,20 +44,8 @@ Update / rollback: redeploy with another `IMAGE_TAG`.
 
 ```bash
 docker context use default
-docker compose -f docker-compose.local.yml up -d
-```
-
-First run only — init Garage:
-
-```bash
 set -a; source .env; set +a
-dc() { docker compose -f docker-compose.local.yml "$@"; }
-dc exec dropicture-garage /garage status
-dc exec dropicture-garage /garage layout assign -z dc1 -c 10G <node_id>
-dc exec dropicture-garage /garage layout apply --version 1
-dc exec dropicture-garage /garage key import --yes "$GARAGE_KEY_ID" "$GARAGE_KEY_SECRET" -n dropicture-app
-dc exec dropicture-garage /garage bucket create dropicture-media
-dc exec dropicture-garage /garage bucket allow --read --write dropicture-media --key dropicture-app
+docker compose -f docker-compose.local.yml up -d
 ```
 
 Open http://localhost:3000 (API: http://localhost:3001).
@@ -81,4 +64,4 @@ Stop: `docker compose -f docker-compose.local.yml down` (`-v` wipes data).
 | `failed to update config` | configs are immutable → bump `name:` (`_v2` → `_v3`) |
 | Cloudflare `52x` | zone SSL mode = **Full (strict)** |
 | deploys to the wrong place | `docker context ls` → `use default` (local) / `use dropicture` (cloud) |
-| app S3 errors | Garage init step skipped |
+| app S3 errors | keys/bucket are created on Garage's **first** boot only → check `docker exec $(docker ps -qf name=garage) /garage key list` and `/garage bucket list`; if the `.env` keys changed since, restore them or wipe the garage volumes to re-init |

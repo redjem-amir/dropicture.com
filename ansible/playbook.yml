@@ -1,6 +1,6 @@
 ---
 # dropicture/ansible/playbook.yml
-- name: Discover nodes from Terraform state
+- name: Discover the server from Terraform state
   hosts: localhost
   connection: local
   gather_facts: false
@@ -44,12 +44,9 @@
         path: "{{ tf_state_file.path }}"
         state: absent
 
-    - name: Extract the manager and worker addresses from the outputs
+    - name: Extract the server address from the outputs
       ansible.builtin.set_fact:
-        _manager_public_ips: "{{ _tfstate.outputs.manager_public_ips.value }}"
-        _manager_private_ips: "{{ _tfstate.outputs.manager_private_ips.value }}"
-        _worker_public_ips: "{{ _tfstate.outputs.worker_public_ips.value }}"
-        _worker_private_ips: "{{ _tfstate.outputs.worker_private_ips.value }}"
+        _server_public_ip: "{{ _tfstate.outputs.manager_public_ip.value }}"
 
     - name: Extract the Origin CA certificate and key from the outputs
       ansible.builtin.set_fact:
@@ -57,17 +54,11 @@
         _origin_key: "{{ _tfstate.outputs.origin_key_pem.value }}"
       no_log: true
 
-    - name: Compute the full private address set
-      ansible.builtin.set_fact:
-        _all_private_ips: "{{ _manager_private_ips + _worker_private_ips }}"
-
     - name: Sanity check on the outputs
       ansible.builtin.assert:
         that:
-          - "_manager_public_ips | length > 0"
-          - "_manager_public_ips | length == (_manager_private_ips | length)"
-          - "_worker_public_ips | length == (_worker_private_ips | length)"
-        fail_msg: "manager_/worker_ public and private IP lists are missing or misaligned in the state."
+          - "_server_public_ip | length > 0"
+        fail_msg: "manager_public_ip is missing from the Terraform state."
         quiet: true
 
     - name: Materialise the SSH private key
@@ -82,38 +73,22 @@
         content: "{{ lookup('env', 'SSH_PRIVATE_KEY_B64') | b64decode }}"
         mode: "0600"
 
-    - name: Register the Swarm managers
+    - name: Register the Swarm server
       ansible.builtin.add_host:
-        name: "{{ item.0 }}"
-        groups: [swarm, swarm_managers]
-        ansible_host: "{{ item.0 }}"
+        name: "{{ _server_public_ip }}"
+        groups: [swarm]
+        ansible_host: "{{ _server_public_ip }}"
         ansible_user: root
         ansible_ssh_private_key_file: "{{ ssh_key.path }}"
         ansible_ssh_common_args: "-o StrictHostKeyChecking=accept-new"
-        node_private_ip: "{{ item.1 }}"
-      loop: "{{ _manager_public_ips | zip(_manager_private_ips) | list }}"
-      loop_control:
-        label: "manager {{ item.0 }} (private {{ item.1 }})"
+        node_public_ip: "{{ _server_public_ip }}"
 
-    - name: Register the Swarm workers
-      ansible.builtin.add_host:
-        name: "{{ item.0 }}"
-        groups: [swarm, swarm_workers]
-        ansible_host: "{{ item.0 }}"
-        ansible_user: root
-        ansible_ssh_private_key_file: "{{ ssh_key.path }}"
-        ansible_ssh_common_args: "-o StrictHostKeyChecking=accept-new"
-        node_private_ip: "{{ item.1 }}"
-      loop: "{{ _worker_public_ips | zip(_worker_private_ips) | list }}"
-      loop_control:
-        label: "worker {{ item.0 }} (private {{ item.1 }})"
-
-- name: Provision Docker Engine on every node
+- name: Provision Docker Engine on the server
   hosts: swarm
   gather_facts: true
   vars:
     dropicture_tls_dir: /opt/dropicture/tls
-    dropicture_data_link: /opt/dropicture/data
+    dropicture_data_dir: /opt/dropicture/data
   handlers:
     - name: Restart docker
       ansible.builtin.service:
@@ -227,20 +202,32 @@
         - name: net.ipv4.ip_forward
           value: "1"
 
-    - name: Locate the Hetzner media volume mountpoint
-      ansible.builtin.set_fact:
-        media_mount: "{{ ansible_mounts | map(attribute='mount') | select('match', '^/mnt/HC_Volume_') | list | first | default('') }}"
+    - name: Check whether the data path is still the old volume symlink
+      ansible.builtin.stat:
+        path: "{{ dropicture_data_dir }}"
+      register: _data_stat
 
-    - name: Ensure the media volume is mounted
+    - name: Refuse to continue if the old Hetzner volume symlink is in place
       ansible.builtin.assert:
         that:
-          - media_mount | length > 0
-        fail_msg: "No /mnt/HC_Volume_* mountpoint found on {{ inventory_hostname }} — is the Hetzner volume attached and automounted?"
+          - not (_data_stat.stat.islnk | default(false))
+        fail_msg: >-
+          {{ dropicture_data_dir }} is still a symlink to the old Hetzner
+          volume. Migrate the data to the local disk and remove the link
+          before re-running this playbook.
         quiet: true
 
-    - name: Create the data directories on the media volume
+    - name: Create the data directory on the local disk
       ansible.builtin.file:
-        path: "{{ media_mount }}/{{ item }}"
+        path: "{{ dropicture_data_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Create the per-service data directories
+      ansible.builtin.file:
+        path: "{{ dropicture_data_dir }}/{{ item }}"
         state: directory
         owner: root
         group: root
@@ -250,12 +237,6 @@
         - dragonfly
         - garage/meta
         - garage/data
-
-    - name: Expose the media volume under a stable path (for identical bind mounts on every node)
-      ansible.builtin.file:
-        src: "{{ media_mount }}"
-        dest: "{{ dropicture_data_link }}"
-        state: link
 
     - name: Ensure the TLS directory exists
       ansible.builtin.file:
@@ -279,79 +260,23 @@
     - name: Apply any pending Docker restart before touching the Swarm
       ansible.builtin.meta: flush_handlers
 
-- name: Initialise the Swarm on the first manager
-  hosts: swarm_managers[0]
+- name: Initialise the single-node Swarm
+  hosts: swarm
   gather_facts: false
   vars:
     swarm_default_addr_pool: ["10.100.0.0/16"]
     swarm_subnet_size: 24
   tasks:
-    - name: Init the Swarm (control plane bound to the private network)
+    - name: Init the Swarm (the server is its own manager, no joins)
       community.docker.docker_swarm:
         state: present
-        advertise_addr: "{{ node_private_ip }}"
-        listen_addr: "{{ node_private_ip }}:2377"
+        advertise_addr: "{{ node_public_ip }}"
+        listen_addr: "{{ node_public_ip }}:2377"
         default_addr_pool: "{{ swarm_default_addr_pool }}"
         subnet_size: "{{ swarm_subnet_size }}"
 
-    - name: Check the ingress network MTU
-      ansible.builtin.shell: >-
-        docker network inspect ingress
-        | grep -q '"com.docker.network.driver.mtu": "1400"'
-      register: _ingress_mtu
-      changed_when: false
-      failed_when: _ingress_mtu.rc not in [0, 1]
-
-    - name: Recreate the ingress network with MTU 1400
-      ansible.builtin.shell: |
-        set -e
-        printf 'y\n' | docker network rm ingress
-        sleep 5
-        docker network create \
-          --driver overlay \
-          --ingress \
-          --opt com.docker.network.driver.mtu=1400 \
-          ingress
-      when: _ingress_mtu.rc != 0
-
-    - name: Read the Swarm join tokens
-      community.docker.docker_swarm_info:
-      register: _swarm_info
-
-    - name: Publish the join tokens as facts
-      ansible.builtin.set_fact:
-        swarm_manager_token: "{{ _swarm_info.swarm_facts.JoinTokens.Manager }}"
-        swarm_worker_token: "{{ _swarm_info.swarm_facts.JoinTokens.Worker }}"
-      no_log: true
-
-- name: Join the remaining managers
-  hosts: swarm_managers
-  gather_facts: false
-  tasks:
-    - name: Join the Swarm as a manager
-      community.docker.docker_swarm:
-        state: join
-        advertise_addr: "{{ node_private_ip }}"
-        listen_addr: "{{ node_private_ip }}:2377"
-        join_token: "{{ hostvars[groups['swarm_managers'][0]].swarm_manager_token }}"
-        remote_addrs:
-          ["{{ hostvars[groups['swarm_managers'][0]].node_private_ip }}:2377"]
-      when: inventory_hostname != groups['swarm_managers'][0]
-
-- name: Join the workers
-  hosts: swarm_workers
-  gather_facts: false
-  tasks:
-    - name: Join the Swarm as a worker
-      community.docker.docker_swarm:
-        state: join
-        advertise_addr: "{{ node_private_ip }}"
-        join_token: "{{ hostvars[groups['swarm_managers'][0]].swarm_worker_token }}"
-        remote_addrs:
-          ["{{ hostvars[groups['swarm_managers'][0]].node_private_ip }}:2377"]
-
-- name: Configure the cluster (secrets, reconciliation)
-  hosts: swarm_managers[0]
+- name: Configure the Swarm (configs, secrets)
+  hosts: swarm
   gather_facts: false
   vars:
     stacks_dir: /opt/dropicture/stacks
@@ -376,21 +301,6 @@
         path: "{{ stacks_dir }}"
         state: directory
         mode: "0750"
-
-    - name: Snapshot the Swarm node list
-      community.docker.docker_swarm_info:
-        nodes: true
-        verbose_output: true
-      register: _swarm_nodes
-
-    - name: Remove nodes that are no longer in the Terraform state
-      ansible.builtin.shell: |
-        set -e
-        docker node demote {{ item.ID }} 2>/dev/null || true
-        docker node rm --force {{ item.ID }}
-      loop: "{{ _swarm_nodes.nodes | rejectattr('Status.Addr', 'in', hostvars['localhost']._all_private_ips) | list }}"
-      loop_control:
-        label: "{{ item.Description.Hostname }} ({{ item.Status.Addr }})"
 
 - name: Clean up
   hosts: localhost

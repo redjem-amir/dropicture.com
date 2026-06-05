@@ -1,59 +1,22 @@
 # dropicture/terraform/outputs.tf
 output "manager_public_ip" {
-  description = "Public IPv4 of the primary manager (manager 1)"
-  value       = hcloud_server.manager[0].ipv4_address
+  description = "Public IPv4 of the server"
+  value       = hcloud_server.manager.ipv4_address
 }
 
 output "manager_public_ipv6" {
-  description = "Public IPv6 of the primary manager (manager 1)"
-  value       = hcloud_server.manager[0].ipv6_address
+  description = "Public IPv6 of the server"
+  value       = hcloud_server.manager.ipv6_address
 }
 
 output "ssh" {
-  description = "SSH command to connect to the primary manager (manager 1)"
-  value       = "ssh root@${hcloud_server.manager[0].ipv4_address}"
+  description = "SSH command to connect to the server"
+  value       = "ssh root@${hcloud_server.manager.ipv4_address}"
 }
 
 output "docker_context" {
   description = "Command to manage the Swarm remotely over SSH from any machine"
-  value       = "docker context create dropicture --docker \"host=ssh://root@${hcloud_server.manager[0].ipv4_address}\""
-}
-
-output "manager_public_ips" {
-  description = "Public IPv4 of every Swarm manager"
-  value       = hcloud_server.manager[*].ipv4_address
-}
-
-output "manager_private_ips" {
-  description = "Private IPs of every Swarm manager (advertise/join targets)"
-  value       = local.manager_private_ips
-}
-
-# --- Worker addresses --------------------------------------------------------
-output "worker_public_ips" {
-  description = "Public IPv4 of every Swarm worker"
-  value       = hcloud_server.worker[*].ipv4_address
-}
-
-output "worker_private_ips" {
-  description = "Private IPs of every Swarm worker"
-  value       = local.worker_private_ips
-}
-
-# --- Combined (managers first, then workers) for convenience -----------------
-output "node_public_ips" {
-  description = "Public IPv4 of every node (managers first, then workers)"
-  value       = concat(hcloud_server.manager[*].ipv4_address, hcloud_server.worker[*].ipv4_address)
-}
-
-output "node_private_ips" {
-  description = "Private IPs of every node (managers first, then workers)"
-  value       = concat(local.manager_private_ips, local.worker_private_ips)
-}
-
-output "media_volume_devices" {
-  description = "Device path of each node's object-storage volume (auto-mounted under /mnt/HC_Volume_<id>)"
-  value       = concat(hcloud_volume.manager_media[*].linux_device, hcloud_volume.worker_media[*].linux_device)
+  value       = "docker context create dropicture --docker \"host=ssh://root@${hcloud_server.manager.ipv4_address}\""
 }
 
 output "site_url" {

@@ -1,14 +1,20 @@
 ## Development setup
 
-The playbook reads the node IPs from the Terraform remote state (S3) and
-configures the whole Docker Swarm cluster over SSH: Docker Engine (CE) with
-log rotation, key-only SSH hardening, `swarm init`/`join` bound to the Hetzner
-private network, the ingress overlay recreated with MTU 1400, the Cloudflare
-Origin CA certificate and key stored as a Swarm config/secret, and any node
-removed from the Terraform state pruned from the cluster. It is idempotent —
-re-run it after every `terraform apply`. It needs only three environment
-variables — the SSH key is decoded by the playbook itself, so no ssh-agent
-setup is required.
+The playbook reads the server IP from the Terraform remote state (S3) and
+configures the single-node Docker Swarm over SSH: Docker Engine (CE) with
+log rotation, key-only SSH hardening, `swarm init` on the public IP (safe:
+the Hetzner firewall only lets 22, 80, 443 and ICMP in, so the Swarm ports
+stay unreachable), the Cloudflare Origin CA certificate and key stored as a
+Swarm config/secret, and the data directories laid out on the server's local
+SSD. It is idempotent — re-run it after every `terraform apply`. It needs
+only three environment variables — the SSH key is decoded by the playbook
+itself, so no ssh-agent setup is required.
+
+> **Migrating from the old multi-node/volume setup?** The playbook refuses to
+> run while `/opt/dropicture/data` is still a symlink to the old Hetzner
+> volume. Copy the data to the local disk first (e.g.
+> `rsync -a /mnt/HC_Volume_*/ /opt/dropicture/data-new/`, then swap), remove
+> the link, and re-run.
 
 1. Create a `.env` file at the repository root (next to `playbook.yml`):
 
@@ -43,12 +49,11 @@ ansible-playbook playbook.yml
 
 ### Corporate proxy (optional)
 
-The playbook no longer makes any HTTP call to the cluster: provisioning,
-`swarm init`/`join`, secrets and node pruning all go over SSH (port 22), which
-is not affected by `http_proxy` / `https_proxy`. The only HTTP traffic from
-the control machine is the Terraform state download from S3, which goes
-through a corporate proxy normally. No `no_proxy` exclusions are needed
-anymore.
+The playbook makes no HTTP call to the server: provisioning, `swarm init`,
+configs and secrets all go over SSH (port 22), which is not affected by
+`http_proxy` / `https_proxy`. The only HTTP traffic from the control machine
+is the Terraform state download from S3, which goes through a corporate proxy
+normally. No `no_proxy` exclusions are needed.
 
 ## Requirements
 
@@ -74,23 +79,15 @@ docker stack services dropicture
 docker service logs -f dropicture_app
 ````
 
-The Origin CA material is available cluster-wide as the `dropicture_origin_cert`
-config and the `dropicture_origin_key` secret — reference them with
-`external: true` in your stack files. Persistent data lives under
-`/opt/dropicture/data/<service>` on every node (stable symlink to the Hetzner
-volume).
+The Origin CA material is available in the Swarm as the
+`dropicture_origin_cert` config and the `dropicture_origin_key` secret —
+reference them with `external: true` in your stack files. Persistent data
+lives under `/opt/dropicture/data/<service>` on the server's local disk.
 
-> **Every overlay network you declare must set MTU 1400** (Hetzner private
-> networks have a 1450 MTU and VXLAN adds 50 bytes — without this, large
-> packets silently drop between nodes):
->
-> ```yaml
-> networks:
->   backend:
->     driver: overlay
->     driver_opts:
->       com.docker.network.driver.mtu: "1400"
-> ```
+> No overlay MTU tuning is needed anymore: with a single node the overlay
+> traffic never leaves the host. You can drop any
+> `com.docker.network.driver.mtu: "1400"` driver_opts inherited from the old
+> multi-node stack files.
 
 ## License
 

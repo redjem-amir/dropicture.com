@@ -1,13 +1,16 @@
 # Dropicture — Infrastructure
 
 Infrastructure as Code for **Dropicture**, a self-hosted photo SaaS running on
-a Hetzner Cloud **Docker Swarm** cluster (a single manager by default, scalable
-through `manager_count` / `worker_count`), fronted by Cloudflare DNS.
+a single Hetzner Cloud server as a **single-node Docker Swarm** (the server is
+its own manager — `docker swarm init`, no joins), fronted by Cloudflare DNS.
+Media lives on the server's local SSD — no attached volumes.
 
 Security model: SSH (22) is open to the world but key-only (enforced by the
 Ansible playbook), HTTP/HTTPS (80/443) are restricted to the Cloudflare IP
-ranges, and the Swarm control/data plane (2377/tcp, 7946/tcp+udp, 4789/udp)
-runs exclusively on the Hetzner private network — it is never exposed publicly.
+ranges, and everything else — including the Swarm ports (2377/tcp,
+7946/tcp+udp, 4789/udp) — is blocked by the Hetzner firewall. With a single
+node there is no cluster traffic to carry, so no private network is
+provisioned.
 
 ## Prerequisites
 
@@ -50,7 +53,7 @@ source .env
 | `AWS_SECRET_ACCESS_KEY` | AWS secret key |
 | `AWS_REGION` | Primary AWS region (`eu-west-3`) |
 | `TF_VAR_hcloud_token` | Hetzner Cloud API token |
-| `TF_VAR_ssh_public_key_b64` | Public SSH key, base64-encoded — the **only** way into the servers |
+| `TF_VAR_ssh_public_key_b64` | Public SSH key, base64-encoded — the **only** way into the server |
 | `CLOUDFLARE_API_TOKEN` | Cloudflare API token (`Zone:Read`, `DNS:Read`, `DNS:Edit`, `SSL and Certificates:Edit` on `dropicture.com`) |
 
 > `.env` is listed in `.gitignore` — never commit it.
@@ -119,16 +122,18 @@ aws s3api put-bucket-lifecycle-configuration \
 terraform init      # initialize providers and the S3 backend
 terraform plan      # preview changes
 terraform apply     # provision the infrastructure
-terraform output    # manager IP, SSH command, docker context command, etc.
+terraform output    # server IP, SSH command, docker context command, etc.
 ```
 
 After `apply`, run the Ansible playbook (see `../ansible/README.md`) to install
-Docker, assemble the Swarm and distribute the TLS material. Re-run it after
-**every** `apply` that adds or removes nodes — it also prunes departed nodes
-from the cluster.
+Docker, initialize the single-node Swarm (`docker swarm init`) and install the
+TLS material. Re-run it after any `apply` that recreates the server (e.g. an
+OS image change).
 
-Scaling is a variable change: bump `worker_count` (or `manager_count`, odd
-numbers only) in `terraform.tfvars`, `apply`, replay the playbook.
+Scaling is vertical only: change `server_type` in `terraform.tfvars`
+(e.g. `cpx32` → `cpx42`) and `apply` — Hetzner resizes the server in place
+with a short power-off/power-on. Once the disk has grown to a larger type, the
+server cannot be downsized back.
 
 To tear everything down:
 
@@ -136,9 +141,9 @@ To tear everything down:
 terraform destroy
 ```
 
-> Note: the photo volumes and the servers have no `prevent_destroy` guard in
-> this configuration. Make sure your data is backed up before running
-> `destroy`.
+> Note: the server — and the media stored on its local disk — has no
+> `prevent_destroy` guard in this configuration. Make sure your data is
+> backed up before running `destroy`.
 
 > `terraform destroy` **will be blocked** by `tls_private_key.origin`, which
 > carries a `prevent_destroy` guard (the Origin CA key is meant to survive
@@ -154,9 +159,9 @@ terraform destroy
 
 Unlike the previous Nomad setup (which left an orphaned ACL token in AWS
 Secrets Manager), the Swarm setup keeps no state outside Terraform and the
-servers themselves: join tokens, Swarm configs and secrets live inside the
-cluster and disappear with it. After `terraform destroy`, only the S3 state
-bucket remains — by design.
+server itself: Swarm configs and secrets live inside the node and disappear
+with it. After `terraform destroy`, only the S3 state bucket remains — by
+design.
 
 ## License
 

@@ -43,9 +43,6 @@ services:
       - frontend
     deploy:
       replicas: 2
-      placement:
-        preferences:
-          - spread: node.id
       update_config:
         parallelism: 1
         order: start-first
@@ -61,7 +58,7 @@ services:
         window: 30s
       resources:
         reservations: { cpus: "0.25", memory: 128M }
-        limits: { cpus: "0.50", memory: 512M }
+        limits: { cpus: "1.00", memory: 512M }
 
   dropicture-backend:
     image: ghcr.io/redjem-amir/dropicture/backend:${IMAGE_TAG:-latest}
@@ -69,7 +66,8 @@ services:
       - frontend
       - backend
     environment:
-      POSTGRES_HOST: dropicture-db
+      POSTGRES_HOST: dropicture-pgbouncer
+      POSTGRES_PORT: "5432"
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
@@ -82,9 +80,6 @@ services:
       S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?S3_SECRET_ACCESS_KEY is required}
     deploy:
       replicas: 2
-      placement:
-        preferences:
-          - spread: node.id
       update_config:
         parallelism: 1
         order: start-first
@@ -99,8 +94,51 @@ services:
         delay: 5s
         window: 30s
       resources:
-        reservations: { cpus: "0.50", memory: 256M }
-        limits: { cpus: "1.50", memory: 1G }
+        reservations: { cpus: "0.50", memory: 512M }
+        limits: { cpus: "2.00", memory: 2G }
+
+  dropicture-pgbouncer:
+    image: edoburu/pgbouncer:v1.24.1-p1
+    networks:
+      - backend
+    environment:
+      DB_HOST: dropicture-db
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB:?POSTGRES_DB is required}
+      DB_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      AUTH_TYPE: scram-sha-256
+      POOL_MODE: transaction
+      DEFAULT_POOL_SIZE: "20"
+      MIN_POOL_SIZE: "5"
+      RESERVE_POOL_SIZE: "5"
+      RESERVE_POOL_TIMEOUT: "3"
+      MAX_CLIENT_CONN: "1000"
+      MAX_PREPARED_STATEMENTS: "200"
+      IGNORE_STARTUP_PARAMETERS: extra_float_digits
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-p", "5432"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      replicas: 2
+      update_config:
+        parallelism: 1
+        order: start-first
+        monitor: 30s
+        failure_action: rollback
+      rollback_config:
+        parallelism: 1
+        order: start-first
+      restart_policy:
+        condition: any
+        delay: 5s
+        window: 30s
+      resources:
+        reservations: { cpus: "0.10", memory: 32M }
+        limits: { cpus: "0.50", memory: 128M }
 
   dropicture-db:
     image: postgres:18.4
@@ -110,11 +148,19 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=80"
+      - "-c"
+      - "shared_buffers=1GB"
+      - "-c"
+      - "effective_cache_size=3GB"
     volumes:
       - /opt/dropicture/data/postgres:/var/lib/postgresql
       - type: tmpfs
         target: /dev/shm
-        tmpfs: { size: 268435456 }
+        tmpfs: { size: 1073741824 }
     stop_grace_period: 1m
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
@@ -124,8 +170,6 @@ services:
       start_period: 30s
     deploy:
       replicas: 1
-      placement:
-        constraints: [node.role == manager]
       update_config:
         parallelism: 1
         order: stop-first
@@ -135,13 +179,13 @@ services:
         delay: 5s
         window: 60s
       resources:
-        reservations: { cpus: "0.50", memory: 512M }
-        limits: { cpus: "2.00", memory: 2G }
+        reservations: { cpus: "1.00", memory: 1G }
+        limits: { cpus: "3.00", memory: 4G }
 
   dropicture-dragonfly:
     image: ghcr.io/dragonflydb/dragonfly:v1.38.1
     command:
-      - "--maxmemory=512mb"
+      - "--maxmemory=1gb"
       - "--dir=/data"
       - "--snapshot_cron=*/30 * * * *"
     ulimits:
@@ -157,8 +201,6 @@ services:
       retries: 5
     deploy:
       replicas: 1
-      placement:
-        constraints: [node.role == manager]
       update_config:
         parallelism: 1
         order: stop-first
@@ -168,8 +210,8 @@ services:
         delay: 5s
         window: 60s
       resources:
-        reservations: { cpus: "0.25", memory: 576M }
-        limits: { cpus: "1.00", memory: 768M }
+        reservations: { cpus: "0.50", memory: 1152M }
+        limits: { cpus: "1.00", memory: 1536M }
 
   dropicture-garage:
     image: dxflrs/garage:v2.3.0
@@ -190,8 +232,6 @@ services:
     stop_grace_period: 1m
     deploy:
       replicas: 1
-      placement:
-        constraints: [node.role == manager]
       update_config:
         parallelism: 1
         order: stop-first
@@ -201,19 +241,15 @@ services:
         delay: 5s
         window: 60s
       resources:
-        reservations: { cpus: "0.25", memory: 256M }
-        limits: { cpus: "1.00", memory: 1G }
+        reservations: { cpus: "0.50", memory: 512M }
+        limits: { cpus: "1.50", memory: 2G }
 
 networks:
   frontend:
     driver: overlay
-    driver_opts:
-      com.docker.network.driver.mtu: "1400"
   backend:
     driver: overlay
     internal: true
-    driver_opts:
-      com.docker.network.driver.mtu: "1400"
 
 configs:
   nginx_conf:
